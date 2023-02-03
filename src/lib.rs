@@ -2,43 +2,34 @@
 #![feature(tuple_trait)]
 #![feature(unboxed_closures)]
 
-use std::{cell::RefCell, marker::Tuple, rc::Rc};
+use std::{marker::Tuple, rc};
 
 #[derive(Clone)]
-pub struct Handle(Rc<RefCell<bool>>);
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        *RefCell::borrow_mut(&self.0) = false;
-    }
-}
+pub struct Handle(rc::Rc<()>);
 
 struct Callback<Args> {
-    alive: Rc<RefCell<bool>>,
+    alive: rc::Weak<()>,
     closure: Box<dyn FnMut<Args, Output = ()>>,
 }
 
 impl<Args: Tuple> Callback<Args> {
-    fn wrap<F>(callback: F) -> Self
-    where
-        F: FnMut<Args, Output = ()> + 'static,
-    {
-        let alive = Rc::new(RefCell::new(true));
-        let closure = Box::new(callback);
-        Self { alive, closure }
-    }
-
-    fn get_handle(&self) -> Handle {
-        Handle(self.alive.clone())
-    }
-
     fn is_alive(&self) -> bool {
-        *self.alive.borrow()
+        self.alive.upgrade().is_some()
     }
 
     fn call(&mut self, args: Args) {
         self.closure.call_mut(args);
     }
+}
+
+fn wrap<F, Args: Tuple>(callback: F) -> (Handle, Callback<Args>)
+where
+    F: FnMut<Args, Output = ()> + 'static,
+{
+    let handle = rc::Rc::new(());
+    let alive = rc::Rc::downgrade(&handle);
+    let closure = Box::new(callback);
+    (Handle(handle), Callback { alive, closure })
 }
 
 #[derive(Default)]
@@ -51,8 +42,7 @@ impl<Args: Tuple> CallbackManager<Args> {
     where
         F: FnMut<Args, Output = ()> + 'static,
     {
-        let callback = Callback::wrap(callback);
-        let handle = callback.get_handle();
+        let (handle, callback) = wrap(callback);
         self.callbacks.push(callback);
         handle
     }
@@ -70,6 +60,8 @@ impl<Args: Tuple> CallbackManager<Args> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     #[test]
@@ -77,7 +69,7 @@ mod tests {
         let mut manager = CallbackManager::default();
 
         // slice to check side-effects
-        let counts = Rc::new(RefCell::new([0; 3]));
+        let counts = rc::Rc::new(RefCell::new([0; 3]));
 
         // create callback for each count entry
         let _handles: Vec<Handle> = counts
@@ -85,7 +77,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(idx, _)| {
-                let counts = Rc::clone(&counts);
+                let counts = rc::Rc::clone(&counts);
                 manager.add(move |n: usize| RefCell::borrow_mut(&counts)[idx] += n)
             })
             .collect();
@@ -99,7 +91,7 @@ mod tests {
         let mut manager = CallbackManager::default();
 
         // slice to check side-effects
-        let counts = Rc::new(RefCell::new([0; 3]));
+        let counts = rc::Rc::new(RefCell::new([0; 3]));
 
         // create callback for each count entry
         let mut handles: Vec<Handle> = counts
@@ -107,7 +99,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(idx, _)| {
-                let counts = Rc::clone(&counts);
+                let counts = rc::Rc::clone(&counts);
                 manager.add(move |n: usize| RefCell::borrow_mut(&counts)[idx] += n)
             })
             .collect();
